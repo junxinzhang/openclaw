@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "google-genai>=1.0.0",
+#     "google-generativeai>=0.7.0",
 #     "pillow>=10.0.0",
 # ]
 # ///
@@ -10,7 +10,7 @@
 Generate images using Google's Nano Banana Pro (Gemini 3 Pro Image) API.
 
 Usage:
-    uv run generate_image.py --prompt "your image description" --filename "output.png" [--resolution 1K|2K|4K] [--api-key KEY]
+    uv run generate_image.py --prompt "your image description" --filename "output.png" [--resolution 1K|2K|4K] [--api-key KEY] [--model MODEL] [--api-endpoint URL]
 
 Multi-image editing (up to 14 images):
     uv run generate_image.py --prompt "combine these images" --filename "output.png" -i img1.png -i img2.png -i img3.png
@@ -22,11 +22,29 @@ import sys
 from pathlib import Path
 
 
+DEFAULT_MODEL = os.environ.get("OPENCLAW_GEMINI_IMAGE_MODEL") or os.environ.get("GEMINI_IMAGE_MODEL") or "gemini-3-pro-image"
+DEFAULT_API_ENDPOINT = os.environ.get("OPENCLAW_GEMINI_API_ENDPOINT") or os.environ.get("GEMINI_API_ENDPOINT")
+
+
 def get_api_key(provided_key: str | None) -> str | None:
     """Get API key from argument first, then environment."""
     if provided_key:
         return provided_key
-    return os.environ.get("GEMINI_API_KEY")
+    return os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENCLAW_LOCAL_GEMINI_KEY")
+
+
+def get_api_endpoint(provided_endpoint: str | None) -> str | None:
+    """Get API endpoint from argument first, then environment."""
+    if provided_endpoint:
+        return provided_endpoint
+    return DEFAULT_API_ENDPOINT
+
+
+def get_model_name(provided_model: str | None) -> str:
+    """Get model name from argument first, then environment."""
+    if provided_model:
+        return provided_model
+    return DEFAULT_MODEL
 
 
 def main():
@@ -60,6 +78,14 @@ def main():
         "--api-key", "-k",
         help="Gemini API key (overrides GEMINI_API_KEY env var)"
     )
+    parser.add_argument(
+        "--api-endpoint",
+        help="Override Gemini API endpoint (e.g., http://127.0.0.1:8045)"
+    )
+    parser.add_argument(
+        "--model",
+        help=f"Model name (default: {DEFAULT_MODEL})"
+    )
 
     args = parser.parse_args()
 
@@ -72,13 +98,24 @@ def main():
         print("  2. Set GEMINI_API_KEY environment variable", file=sys.stderr)
         sys.exit(1)
 
+    model_name = get_model_name(args.model)
+    api_endpoint = get_api_endpoint(args.api_endpoint)
+
     # Import here after checking API key to avoid slow import on error
-    from google import genai
-    from google.genai import types
+    import google.generativeai as genai
+    from google.generativeai import types
     from PIL import Image as PILImage
 
     # Initialise client
-    client = genai.Client(api_key=api_key)
+    if api_endpoint:
+        genai.configure(
+            api_key=api_key,
+            transport="rest",
+            client_options={"api_endpoint": api_endpoint},
+        )
+    else:
+        genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(model_name)
 
     # Set up output path
     output_path = Path(args.filename)
@@ -117,54 +154,69 @@ def main():
             print(f"Auto-detected resolution: {output_resolution} (from max input dimension {max_input_dim})")
 
     # Build contents (images first if editing, prompt only if generating)
+    prompt = args.prompt
+    if output_resolution:
+        prompt = f"{prompt}\n\nOutput resolution: {output_resolution}."
     if input_images:
-        contents = [*input_images, args.prompt]
+        contents = [*input_images, prompt]
         img_count = len(input_images)
         print(f"Processing {img_count} image{'s' if img_count > 1 else ''} with resolution {output_resolution}...")
     else:
-        contents = args.prompt
+        contents = prompt
         print(f"Generating image with resolution {output_resolution}...")
 
     try:
-        response = client.models.generate_content(
-            model="gemini-3-pro-image-preview",
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_modalities=["TEXT", "IMAGE"],
-                image_config=types.ImageConfig(
-                    image_size=output_resolution
-                )
-            )
+        response = model.generate_content(
+            contents,
+            generation_config=types.GenerationConfig(response_mime_type="image/png"),
         )
 
         # Process response and convert to PNG
         image_saved = False
-        for part in response.parts:
-            if part.text is not None:
-                print(f"Model response: {part.text}")
-            elif part.inline_data is not None:
+        parts = []
+        if getattr(response, "parts", None):
+            parts.extend(response.parts)
+        if getattr(response, "candidates", None):
+            for candidate in response.candidates:
+                content = getattr(candidate, "content", None)
+                if content and getattr(content, "parts", None):
+                    parts.extend(content.parts)
+
+        last_error: Exception | None = None
+        for part in parts:
+            # Prefer inline_data: some SDK parts include empty text even when inline_data is present.
+            if getattr(part, "inline_data", None) is not None:
                 # Convert inline data to PIL Image and save as PNG
                 from io import BytesIO
 
                 # inline_data.data is already bytes, not base64
                 image_data = part.inline_data.data
+                if not image_data:
+                    continue
                 if isinstance(image_data, str):
                     # If it's a string, it might be base64
                     import base64
                     image_data = base64.b64decode(image_data)
 
-                image = PILImage.open(BytesIO(image_data))
+                try:
+                    image = PILImage.open(BytesIO(image_data))
 
-                # Ensure RGB mode for PNG (convert RGBA to RGB with white background if needed)
-                if image.mode == 'RGBA':
-                    rgb_image = PILImage.new('RGB', image.size, (255, 255, 255))
-                    rgb_image.paste(image, mask=image.split()[3])
-                    rgb_image.save(str(output_path), 'PNG')
-                elif image.mode == 'RGB':
-                    image.save(str(output_path), 'PNG')
-                else:
-                    image.convert('RGB').save(str(output_path), 'PNG')
-                image_saved = True
+                    # Ensure RGB mode for PNG (convert RGBA to RGB with white background if needed)
+                    if image.mode == 'RGBA':
+                        rgb_image = PILImage.new('RGB', image.size, (255, 255, 255))
+                        rgb_image.paste(image, mask=image.split()[3])
+                        rgb_image.save(str(output_path), 'PNG')
+                    elif image.mode == 'RGB':
+                        image.save(str(output_path), 'PNG')
+                    else:
+                        image.convert('RGB').save(str(output_path), 'PNG')
+                    image_saved = True
+                    break
+                except Exception as e:
+                    last_error = e
+                    continue
+            elif getattr(part, "text", None):
+                print(f"Model response: {part.text}")
 
         if image_saved:
             full_path = output_path.resolve()
@@ -173,6 +225,10 @@ def main():
             print(f"MEDIA: {full_path}")
         else:
             print("Error: No image was generated in the response.", file=sys.stderr)
+            if last_error is not None:
+                print(f"Last error: {last_error}", file=sys.stderr)
+            if getattr(response, "candidates", None):
+                print(response.candidates, file=sys.stderr)
             sys.exit(1)
 
     except Exception as e:
