@@ -70,7 +70,8 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Use NODE_OPTIONS to load preload modules
-export NODE_OPTIONS="--import $SCRIPT_DIR/node_modules/tsx/dist/loader.mjs --import /Users/kiyoliang/.openclaw-dev/llm-proxy-preload.mjs"
+export NODE_OPTIONS="--import $SCRIPT_DIR/node_modules/tsx/dist/loader.mjs"
+## --import /Users/kiyoliang/.openclaw-dev/llm-proxy-preload.mjs"
 
 # Use pnpm openclaw directly
 nohup /opt/homebrew/bin/pnpm openclaw --dev gateway > /tmp/openclaw-dev-gateway.log 2>&1 &
