@@ -58,15 +58,31 @@ for key in keys:
 
 dev["agents"]["defaults"].setdefault("memorySearch", {})["fallback"] = "none"
 
+dev["browser"] = {
+    "enabled": True,
+    "attachOnly": True,
+    "defaultProfile": "chrome"
+}
+
 dev_path.write_text(json.dumps(dev, indent=2, ensure_ascii=False) + "\n")
 PY
 
 # Kill any process listening on 19001 (Server)
 # We purposely ignore ESTABLISHED connections (like Browser clients) to avoid killing them.
-GATEWAY_PID=$(lsof -tiTCP:19001 -sTCP:LISTEN 2>/dev/null || true)
-if [ -n "$GATEWAY_PID" ]; then
-  echo "Stopping existing gateway (PID: $GATEWAY_PID)..."
-  kill -9 "$GATEWAY_PID"
+GATEWAY_PIDS=$(lsof -tiTCP:19001 -sTCP:LISTEN 2>/dev/null | sort -u || true)
+if [ -n "$GATEWAY_PIDS" ]; then
+  echo "Stopping existing gateway (PIDs: $(echo "$GATEWAY_PIDS" | xargs))..."
+  # Shell splits on newlines/spaces correctly when unquoted
+  # shellcheck disable=SC2086
+  kill -9 $GATEWAY_PIDS 2>/dev/null || true
+
+  # Wait for processes to exit to ensure port is free
+  for pid in $GATEWAY_PIDS; do
+      # shellcheck disable=SC2086
+      while kill -0 "$pid" 2>/dev/null; do
+          sleep 0.1
+      done
+  done
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
