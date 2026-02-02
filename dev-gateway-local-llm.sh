@@ -49,12 +49,14 @@ prod = json.loads(prod_path.read_text())
 dev = json.loads(dev_path.read_text())
 
 prod_defaults = prod.get("agents", {}).get("defaults", {})
-keys = ("model", "imageModel", "models")
+keys = ("model", "imageModel", "models", "memorySearch")
 
 dev.setdefault("agents", {}).setdefault("defaults", {})
 for key in keys:
     if key in prod_defaults:
         dev["agents"]["defaults"][key] = prod_defaults[key]
+
+dev["agents"]["defaults"].setdefault("memorySearch", {})["fallback"] = "none"
 
 dev_path.write_text(json.dumps(dev, indent=2, ensure_ascii=False) + "\n")
 PY
